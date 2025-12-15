@@ -97,6 +97,7 @@ class IceReader:
                 chunks=chunks,
                 parallel=parallel,
                 combine="by_coords",
+                engine="netcdf4",
             )
             return ds[var]
 
@@ -117,6 +118,7 @@ class IceReader:
             chunks=chunks,
             parallel=parallel,
             combine="by_coords",
+            engine="netcdf4",
         )
         return ds[var]
 
