@@ -14,7 +14,7 @@ Source = Literal["ACCESS-OM2", "EN4", "ORAS5"]
 
 
 @dataclass(frozen=True)
-class OceanReader:
+class IceReader:
     """
     Read ocean T/S (and other) data from supported sources and return an xarray DataArray.
 
