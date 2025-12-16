@@ -235,6 +235,19 @@ class IceReader:
 
     # ---------- AWI L2/L3 helpers ----------
 
+    def list_awi_platforms(
+            self,
+            *,
+            hemisphere: str = "sh",
+            level: int = 3,
+            awi_root: str = "/g/data/gv90/da1339/SeaIce/AWI",
+        ) -> list[str]:
+            """Return platforms available on disk for a given hemisphere + level."""
+            base = Path(awi_root) / self._awi_release_dir(level) / hemisphere
+            if not base.exists():
+                return []
+            return sorted([p.name for p in base.iterdir() if p.is_dir()])
+
     @staticmethod
     def _awi_release_dir(level: int) -> str:
         if level == 3:
@@ -275,6 +288,95 @@ class IceReader:
 
     # ---------- Public method ----------
 
+    # def read_awi(
+    #     self,
+    #     *,
+    #     var: str | Sequence[str] = "sea_ice_thickness",
+    #     start_year: int,
+    #     end_year: int,
+    #     level: int = 3,
+    #     hemisphere: str = "sh",
+    #     platform: str = "cryosat2",
+    #     awi_root: str = "/g/data/gv90/da1339/SeaIce/AWI",
+    #     chunks: dict | str | None = None,
+    #     parallel: bool = False,
+    #     engine: str = "netcdf4",
+    #     decode_timedelta: bool = False,
+    # ) -> xr.DataArray | xr.Dataset:
+    #     """
+    #     Read AWI ESA CCI sea-ice thickness products (default: L3CP).
+
+    #     Parameters
+    #     ----------
+    #     var
+    #         A variable name (returns DataArray) or list/tuple of names (returns Dataset).
+    #         Common: "sea_ice_thickness", "snow_depth", "sea_ice_freeboard", etc.
+    #     start_year, end_year
+    #         Inclusive year range.
+    #     level
+    #         3 (default) for l3cp_release, or 2 for l2p_release.
+    #     hemisphere
+    #         "sh" or "nh".
+    #     platform
+    #         e.g. "cryosat2", "envisat", "sentinel3a", "sentinel3b".
+    #     awi_root
+    #         Root directory containing l2p_release/ and l3cp_release/.
+    #     chunks
+    #         Use None for eager open; "auto" or dict for dask arrays.
+    #     parallel
+    #         Keep False by default on Gadi to reduce netCDF/HDF contention.
+    #     engine
+    #         "netcdf4" or "h5netcdf" if you hit HDF errors.
+    #     """
+
+    #     fpaths = self._get_awi_filepaths(
+    #         awi_root=awi_root,
+    #         level=level,
+    #         hemisphere=hemisphere,
+    #         platform=platform,
+    #         start_year=start_year,
+    #         end_year=end_year,
+    #     )
+    #     if not fpaths:
+    #         raise FileNotFoundError(
+    #             f"No AWI files found: root={awi_root}, level={level}, hemi={hemisphere}, "
+    #             f"platform={platform}, years={start_year}-{end_year}"
+    #         )
+
+    #     # normalise var argument
+    #     if isinstance(var, str):
+    #         want_vars = [var]
+    #         return_dataarray = True
+    #     else:
+    #         want_vars = list(var)
+    #         return_dataarray = False
+
+    #     def _pre(ds: xr.Dataset) -> xr.Dataset:
+    #         # ensure lat/lon are treated as coordinates for convenience
+    #         for c in ("lat", "lon", "xc", "yc"):
+    #             if c in ds:
+    #                 ds = ds.set_coords(c)
+
+    #         # keep only requested vars (plus coords that may be stored as variables)
+    #         keep = [v for v in want_vars if v in ds.data_vars]
+    #         if not keep:
+    #             raise KeyError(f"Requested var(s) {want_vars} not found. Available: {list(ds.data_vars)}")
+
+    #         return ds[keep]
+
+    #     ds = xr.open_mfdataset(
+    #         fpaths,
+    #         preprocess=_pre,
+    #         combine="by_coords",         # each file has time=1; by_coords is fine
+    #         decode_timedelta=decode_timedelta,
+    #         chunks=chunks,
+    #         parallel=parallel,
+    #         engine=engine,
+    #     )
+
+    #     if return_dataarray:
+    #         return ds[want_vars[0]]
+    #     return ds
     def read_awi(
         self,
         *,
@@ -283,54 +385,49 @@ class IceReader:
         end_year: int,
         level: int = 3,
         hemisphere: str = "sh",
-        platform: str = "cryosat2",
+        platform: str | None = "cryosat2",
+        platforms: Sequence[str] | None = None,
         awi_root: str = "/g/data/gv90/da1339/SeaIce/AWI",
         chunks: dict | str | None = None,
         parallel: bool = False,
         engine: str = "netcdf4",
         decode_timedelta: bool = False,
+        stack_platform: bool | None = None,
+        strict_platforms: bool = False,
+        collapse_platforms: bool = False,
     ) -> xr.DataArray | xr.Dataset:
         """
-        Read AWI ESA CCI sea-ice thickness products (default: L3CP).
+        Platform-agnostic AWI reader.
 
-        Parameters
-        ----------
-        var
-            A variable name (returns DataArray) or list/tuple of names (returns Dataset).
-            Common: "sea_ice_thickness", "snow_depth", "sea_ice_freeboard", etc.
-        start_year, end_year
-            Inclusive year range.
-        level
-            3 (default) for l3cp_release, or 2 for l2p_release.
-        hemisphere
-            "sh" or "nh".
-        platform
-            e.g. "cryosat2", "envisat", "sentinel3a", "sentinel3b".
-        awi_root
-            Root directory containing l2p_release/ and l3cp_release/.
-        chunks
-            Use None for eager open; "auto" or dict for dask arrays.
-        parallel
-            Keep False by default on Gadi to reduce netCDF/HDF contention.
-        engine
-            "netcdf4" or "h5netcdf" if you hit HDF errors.
+        Key behaviours
+        --------------
+        - platforms=None and platform="cryosat2" => single platform (backwards compatible).
+        - platform="all" (or platform=None) => auto-discover all platforms on disk.
+        - platforms=[...] => explicit multi-platform request.
+        - If multiple platforms:
+            * default is to stack along a new 'platform' dimension (platform, time, yc, xc)
+            * optionally collapse into one product via combine_first (priority order)
         """
 
-        fpaths = self._get_awi_filepaths(
-            awi_root=awi_root,
-            level=level,
-            hemisphere=hemisphere,
-            platform=platform,
-            start_year=start_year,
-            end_year=end_year,
-        )
-        if not fpaths:
+        # ---- normalise requested platform list ----
+        if platforms is not None:
+            plat_list = list(platforms)
+        else:
+            if platform is None or str(platform).lower() == "all":
+                plat_list = self.list_awi_platforms(hemisphere=hemisphere, level=level, awi_root=awi_root)
+            else:
+                plat_list = [platform]
+
+        if not plat_list:
             raise FileNotFoundError(
-                f"No AWI files found: root={awi_root}, level={level}, hemi={hemisphere}, "
-                f"platform={platform}, years={start_year}-{end_year}"
+                f"No AWI platforms found: root={awi_root}, level={level}, hemisphere={hemisphere}"
             )
 
-        # normalise var argument
+        # If more than one platform and user didn't specify, default to stacking
+        if stack_platform is None:
+            stack_platform = (len(plat_list) > 1)
+
+        # ---- normalise var argument ----
         if isinstance(var, str):
             want_vars = [var]
             return_dataarray = True
@@ -339,28 +436,77 @@ class IceReader:
             return_dataarray = False
 
         def _pre(ds: xr.Dataset) -> xr.Dataset:
-            # ensure lat/lon are treated as coordinates for convenience
+            # Promote common coords for convenience
             for c in ("lat", "lon", "xc", "yc"):
                 if c in ds:
                     ds = ds.set_coords(c)
 
-            # keep only requested vars (plus coords that may be stored as variables)
             keep = [v for v in want_vars if v in ds.data_vars]
             if not keep:
                 raise KeyError(f"Requested var(s) {want_vars} not found. Available: {list(ds.data_vars)}")
 
             return ds[keep]
 
-        ds = xr.open_mfdataset(
-            fpaths,
-            preprocess=_pre,
-            combine="by_coords",         # each file has time=1; by_coords is fine
-            decode_timedelta=decode_timedelta,
-            chunks=chunks,
-            parallel=parallel,
-            engine=engine,
-        )
+        # ---- open per-platform to keep bookkeeping clean ----
+        per_platform: list[xr.Dataset] = []
+        missing: list[str] = []
 
+        for plat in plat_list:
+            fpaths = self._get_awi_filepaths(
+                awi_root=awi_root,
+                level=level,
+                hemisphere=hemisphere,
+                platform=plat,
+                start_year=start_year,
+                end_year=end_year,
+            )
+            if not fpaths:
+                missing.append(plat)
+                continue
+
+            ds_plat = xr.open_mfdataset(
+                fpaths,
+                preprocess=_pre,
+                combine="by_coords",
+                decode_timedelta=decode_timedelta,
+                chunks=chunks,
+                parallel=parallel,
+                engine=engine,
+            )
+
+            # annotate platform (only if stacking/collapsing makes sense)
+            ds_plat = ds_plat.assign_coords(platform=plat).expand_dims(platform=[plat])
+            per_platform.append(ds_plat)
+
+        if missing and strict_platforms:
+            raise FileNotFoundError(
+                f"No files found for platforms={missing} (strict_platforms=True). "
+                f"Requested platforms={plat_list}, years={start_year}-{end_year}."
+            )
+
+        if not per_platform:
+            raise FileNotFoundError(
+                f"No AWI files found for any requested platform. platforms={plat_list}, years={start_year}-{end_year}"
+            )
+
+        # ---- combine platforms ----
+        if len(per_platform) == 1:
+            ds = per_platform[0]
+            # drop platform dim for backwards compatibility if user did not ask for stacking
+            if not stack_platform:
+                ds = ds.isel(platform=0, drop=True)
+        else:
+            if collapse_platforms:
+                # Priority order is plat_list (the order user provided or discovered)
+                ds = per_platform[0].isel(platform=0, drop=True)
+                for nxt in per_platform[1:]:
+                    ds = ds.combine_first(nxt.isel(platform=0, drop=True))
+            else:
+                # Stack: output dims include platform and preserve overlaps
+                ds = xr.concat(per_platform, dim="platform", join="outer")
+
+        # ---- return type ----
         if return_dataarray:
             return ds[want_vars[0]]
         return ds
+
