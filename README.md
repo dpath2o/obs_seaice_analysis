@@ -23,12 +23,18 @@ In progress:
 
 ## Repository layout
 
+```
 obs_seaice_analysis/
-├── init.py # exports IceReader
+├── __init__.py              # exports IceReader
 ├── src/
-│ ├── init.py
-│ └── IceReader.py # core reader class (model + satellite products)
-└── notebooks/ # working notebooks / examples (WIP)
+│   ├── __init__.py
+│   └── IceReader.py         # core reader class (model + satellite products)
+├── notebooks/               # working notebooks / examples (WIP)
+└── scripts/
+    └── downloading/
+        ├── download_AWI_SIT.py   # resumable FTP mirror for AWI ESA-CCI products
+        └── download_AWI_SIT.pbs  # example PBS job for Gadi (copyq)
+```
 
 ## Getting started
 
@@ -169,6 +175,40 @@ def plot_sit_monthly(sit, D_out,
         fig.colorbar(frame = ['x+lSea-ice thickness (m)'])
         fig.savefig(D_out / f"awi_sit_{platform_name}_{tstr}.png", dpi=300)
 ```
+
+## Downloading AWI data (optional)
+
+Two helper scripts are included under `scripts/downloading/` to mirror the AWI ESA-CCI (CRDP v4p0)
+tree from `ftp.awi.de` to local disk:
+
+- `download_AWI_SIT.py`: plain FTP mirror (anonymous), verbose logging, **resumable** downloads (`.part`),
+  retry logic, year range filters, include/exclude globs, and passive/active mode fallback.
+- `download_AWI_SIT.pbs`: example PBS job script for **Gadi copyq** to run the mirror unattended.
+
+### Local usage
+
+```bash
+cd /path/to/obs_seaice_analysis/scripts/downloading
+python download_AWI_SIT.py --year-min 2010 --year-max 2025
+```
+
+Common environment variables (all optional):
+
+- `REMOTE_BASE` / `REMOTE_ROOT` (default: `/sea_ice/projects/cci/crdp/v4p0`)
+- `LOCAL_ROOT` (default: `~/seaice/AWI`)
+- `INCLUDE_GLOBS` (default: `*.nc`)
+- `EXCLUDE_GLOBS` (default: empty)
+- `PASSIVE_MODE` (`1` default; set to `0` if LIST timeouts occur)
+- `FTP_USER` / `FTP_PASS` (default anonymous; AWI FTP typically accepts `anonymous` with an email-like password)
+
+### Gadi usage (PBS)
+
+```bash
+qsub scripts/downloading/download_AWI_SIT.pbs
+```
+
+Before submitting, confirm the PBS directives and `LOCAL_ROOT` are appropriate for the expected data volume
+(e.g., consider pointing `LOCAL_ROOT` to a project or scratch location rather than `$HOME`).
 
 ## Legacy scripts to be incorporated
 

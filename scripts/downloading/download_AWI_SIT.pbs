@@ -11,7 +11,7 @@
 #PBS -e download_AWI_SIT.err
 module use /g/data/xp65/public/modules
 module load conda/analysis3-25.05
-cd ~/AFIM/src/AFIM/scripts/downloading
+cd /home/581/da1339/AFIM/src/obs_seaice_analysis/scripts/downloading
 # PBS env
 export FTP_USER=anonymous
 export FTP_PASS=daniel.atwater@utas.edu.au
