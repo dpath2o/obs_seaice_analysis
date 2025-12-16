@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Literal
+from typing import Callable, Iterable, Literal, Sequence
 
+import re
 import glob
 import os
 import numpy as np
@@ -89,7 +90,14 @@ class IceReader:
 
         # ORAS5 needs special handling
         if src == "ORAS5":
-            preprocess = self._preprocess_oras5(var=var, latmin=latmin, latmax=latmax, zmin=zmin, zmax=zmax)
+            ysl = self._oras5_yslice(fpaths[0], latmin, latmax)
+
+            def preprocess(ds):
+                da = ds[var].isel(x=slice(0, 1440), y=ysl)
+                if "deptht" in da.dims:
+                    da = da.sel(deptht=slice(zmin, zmax))
+                return da.to_dataset(name=var)
+
             ds = xr.open_mfdataset(
                 fpaths,
                 preprocess=preprocess,
@@ -100,27 +108,6 @@ class IceReader:
                 engine="netcdf4",
             )
             return ds[var]
-
-        # Generic multi-file case (EN4, ACCESS-OM2 non-fx, etc.)
-        dims = self._infer_var_dims(fpaths[0], var=var, decode_timedelta=decode_timedelta)
-        preprocess = self._preprocess_generic(
-            var=var,
-            dims=dims,
-            latmin=latmin,
-            latmax=latmax,
-            zmin=zmin,
-            zmax=zmax,
-        )
-        ds = xr.open_mfdataset(
-            fpaths,
-            preprocess=preprocess,
-            decode_timedelta=decode_timedelta,
-            chunks=chunks,
-            parallel=parallel,
-            combine="by_coords",
-            engine="netcdf4",
-        )
-        return ds[var]
 
     # -----------------------
     # internal helpers
@@ -188,6 +175,18 @@ class IceReader:
             return ds
 
         return _sel
+    
+    def _oras5_yslice(self, sample_path: str, latmin: float, latmax: float) -> slice:
+        import numpy as np
+        import xarray as xr
+
+        with xr.open_dataset(sample_path, decode_timedelta=False, engine="netcdf4") as ds0:
+            # nav_lat is (y, x) -> make a 1D representative transect
+            lat1d = ds0["nav_lat"].isel(x=0).values  # shape (y,)
+        jj = np.where((lat1d >= latmin) & (lat1d <= latmax))[0]
+        if jj.size == 0:
+            raise ValueError(f"No ORAS5 y indices found for lat range [{latmin}, {latmax}]")
+        return slice(int(jj.min()), int(jj.max()) + 1)
 
     def _preprocess_oras5(
         self,
@@ -233,3 +232,135 @@ class IceReader:
         if len(dims) == 2:
             return da.sel({dims[0]: slice(latmin, latmax)})
         return da
+
+    # ---------- AWI L2/L3 helpers ----------
+
+    @staticmethod
+    def _awi_release_dir(level: int) -> str:
+        if level == 3:
+            return "l3cp_release"
+        if level == 2:
+            return "l2p_release"
+        raise ValueError("level must be 2 or 3")
+
+    @staticmethod
+    def _awi_datekey_from_fname(fname: str) -> str:
+        """
+        Extract YYYYMM or YYYYMMDD token from filenames like:
+        ...-201011-fv4p0.nc  or similar.
+        Returns a sortable string; falls back to fname if not found.
+        """
+        m = re.search(r"-(\d{6,8})-", Path(fname).name)
+        return m.group(1) if m else Path(fname).name
+
+    def _get_awi_filepaths(
+        self,
+        *,
+        awi_root: str,
+        level: int,
+        hemisphere: str,
+        platform: str,
+        start_year: int,
+        end_year: int,
+        pattern: str = "*.nc",
+    ) -> list[str]:
+        base = Path(awi_root) / self._awi_release_dir(level) / hemisphere / platform
+        fpaths: list[str] = []
+        for yr in range(int(start_year), int(end_year) + 1):
+            ydir = base / str(yr)
+            fpaths.extend(sorted(map(str, ydir.glob(pattern))))
+        # sort by date token in filename (YYYYMM / YYYYMMDD)
+        fpaths = sorted(fpaths, key=self._awi_datekey_from_fname)
+        return fpaths
+
+    # ---------- Public method ----------
+
+    def read_awi(
+        self,
+        *,
+        var: str | Sequence[str] = "sea_ice_thickness",
+        start_year: int,
+        end_year: int,
+        level: int = 3,
+        hemisphere: str = "sh",
+        platform: str = "cryosat2",
+        awi_root: str = "/g/data/gv90/da1339/SeaIce/AWI",
+        chunks: dict | str | None = None,
+        parallel: bool = False,
+        engine: str = "netcdf4",
+        decode_timedelta: bool = False,
+    ) -> xr.DataArray | xr.Dataset:
+        """
+        Read AWI ESA CCI sea-ice thickness products (default: L3CP).
+
+        Parameters
+        ----------
+        var
+            A variable name (returns DataArray) or list/tuple of names (returns Dataset).
+            Common: "sea_ice_thickness", "snow_depth", "sea_ice_freeboard", etc.
+        start_year, end_year
+            Inclusive year range.
+        level
+            3 (default) for l3cp_release, or 2 for l2p_release.
+        hemisphere
+            "sh" or "nh".
+        platform
+            e.g. "cryosat2", "envisat", "sentinel3a", "sentinel3b".
+        awi_root
+            Root directory containing l2p_release/ and l3cp_release/.
+        chunks
+            Use None for eager open; "auto" or dict for dask arrays.
+        parallel
+            Keep False by default on Gadi to reduce netCDF/HDF contention.
+        engine
+            "netcdf4" or "h5netcdf" if you hit HDF errors.
+        """
+
+        fpaths = self._get_awi_filepaths(
+            awi_root=awi_root,
+            level=level,
+            hemisphere=hemisphere,
+            platform=platform,
+            start_year=start_year,
+            end_year=end_year,
+        )
+        if not fpaths:
+            raise FileNotFoundError(
+                f"No AWI files found: root={awi_root}, level={level}, hemi={hemisphere}, "
+                f"platform={platform}, years={start_year}-{end_year}"
+            )
+
+        # normalise var argument
+        if isinstance(var, str):
+            want_vars = [var]
+            return_dataarray = True
+        else:
+            want_vars = list(var)
+            return_dataarray = False
+
+        def _pre(ds: xr.Dataset) -> xr.Dataset:
+            # ensure lat/lon are treated as coordinates for convenience
+            for c in ("lat", "lon", "xc", "yc"):
+                if c in ds:
+                    ds = ds.set_coords(c)
+
+            # keep only requested vars (plus coords that may be stored as variables)
+            keep = [v for v in want_vars if v in ds.data_vars]
+            if not keep:
+                raise KeyError(f"Requested var(s) {want_vars} not found. Available: {list(ds.data_vars)}")
+
+            return ds[keep]
+
+        ds = xr.open_mfdataset(
+            fpaths,
+            preprocess=_pre,
+            combine="by_coords",         # each file has time=1; by_coords is fine
+            decode_timedelta=decode_timedelta,
+            chunks=chunks,
+            parallel=parallel,
+            engine=engine,
+        )
+
+        if return_dataarray:
+            return ds[want_vars[0]]
+        return ds
