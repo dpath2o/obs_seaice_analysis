@@ -11,7 +11,7 @@ import numpy as np
 import xarray as xr
 
 
-Source = Literal["ACCESS-OM2", "EN4", "ORAS5"]
+Source = Literal["ACCESS-OM2", "ACCESS-OM3", "EN4", "ORAS5"]
 
 
 @dataclass(frozen=True)
@@ -28,11 +28,11 @@ class IceReader:
 
     base_dir: str = "/g/data/gv90/wrh581"
 
-    def read(
+    def read_model(
         self,
         *,
         src: Source,
-        expt: str = "obs",
+        expt: str = "ORAS5",
         var: str,
         start_year: int,
         end_year: int,
